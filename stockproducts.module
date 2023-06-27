@@ -1,0 +1,259 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function stockproducts_menu() {
+  $items = array();
+
+  // Страница списка товаров
+  $items['admin/stockproducts'] = array(
+    'title' => 'Stock Products',
+    'page callback' => 'stockproducts_list_page',
+    'access arguments' => array('access content'),
+  );
+
+  // Форма добавления товара
+  $items['admin/stockproducts/add'] = array(
+    'title' => 'Add Product',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('stockproducts_add_form'),
+    'access arguments' => array('administer stock products'),
+  );
+
+  // Обработчик формы добавления товара
+  $items['admin/stockproducts/add-submit'] = array(
+    'page callback' => 'stockproducts_add_form_submit',
+    'access arguments' => array('administer stock products'),
+    'type' => MENU_CALLBACK,
+  );
+
+  // Обработчик формы удаления товара
+  $items['admin/stockproducts/delete/%'] = array(
+    'page callback' => 'stockproducts_delete_item',
+    'page arguments' => array(2),
+    'access arguments' => array('administer stock products'),
+    'type' => MENU_CALLBACK,
+  );
+
+  // Обработчик формы изменения количества товара
+  $items['admin/stockproducts/edit-quantity/%/%'] = array(
+    'page callback' => 'stockproducts_edit_quantity',
+    'page arguments' => array(2, 3),
+    'access arguments' => array('administer stock products'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Page callback for the stock products list page.
+ */
+function stockproducts_list_page() {
+  $header = array('Product', 'SKU', 'Quantity', 'Purchase Price');
+  $rows = array();
+
+  // Получение списка товаров из базы данных
+  $results = db_query('SELECT n.nid, n.title, p.model, f.field_stockdata_value
+    FROM {node} n
+    INNER JOIN {uc_products} p ON n.nid = p.nid
+    INNER JOIN {field_data_field_stockdata} f ON n.nid = f.entity_id
+    WHERE n.type = :type', array(':type' => 'product'));
+
+
+  foreach ($results as $result) {
+    $node = node_load($result->nid);
+    $stock_data = json_decode($result->field_stockdata_value, TRUE);
+
+    $rows[] = array(
+      l($node->title, 'node/' . $node->nid),
+      $result->model,
+      $stock_data['quantity'],
+      $stock_data['purchase_price'],
+    );
+  }
+
+  $output = theme('table', array('header' => $header, 'rows' => $rows));
+
+  // Добавление формы добавления товара
+  $output .= '<h2>Add Product</h2>';
+  $output .= drupal_get_form('stockproducts_add_form');
+
+  return $output;
+}
+
+
+/**
+ * Form callback for the add product form.
+ */
+function stockproducts_add_form($form, &$form_state) {
+  $form['title'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Product Name',
+    '#required' => TRUE,
+  );
+
+  $form['sku'] = array(
+    '#type' => 'textfield',
+    '#title' => 'SKU',
+    '#required' => TRUE,
+  );
+
+  $form['quantity'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Quantity',
+    '#required' => TRUE,
+  );
+
+  $form['purchase_price'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Purchase Price',
+    '#required' => TRUE,
+  );
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => 'Add',
+  );
+
+  return $form;
+}
+
+/**
+ * Form submit callback for the add product form.
+ */
+function stockproducts_add_form_submit($form, &$form_state) {
+  $values = $form_state['values'];
+
+  // Поиск товара по SKU
+  $product = db_query("SELECT p.nid FROM {uc_products} p WHERE p.model = :model", array(':model' => $values['sku']))->fetchField();
+
+  if (!$product) {
+    drupal_set_message('A product with the specified SKU does not exist.', 'error');
+  } else {
+    // Создание данных о запасах
+    $stock_data = array(
+      'quantity' => $values['quantity'],
+      'purchase_price' => $values['purchase_price'],
+    );
+
+    // Сериализация данных о запасах
+    $stock_data_json = json_encode($stock_data);
+
+    // Поиск существующих данных о запасах для данного товара
+    $existing_stock_data = db_query("SELECT delta, field_stockdata_value FROM {field_data_field_stockdata} WHERE entity_type = :entity_type AND bundle = :bundle AND entity_id = :entity_id", array(
+      ':entity_type' => 'node',
+      ':bundle' => 'product',
+      ':entity_id' => $product,
+    ))->fetchAllKeyed(0, 1);
+
+    // Проверка наличия записей о запасах с той же ценой
+    $matching_price_deltas = array();
+    foreach ($existing_stock_data as $delta => $data) {
+      $existing_data = json_decode($data, TRUE);
+      if ($existing_data['purchase_price'] == $values['purchase_price']) {
+        $matching_price_deltas[] = $delta;
+      }
+    }
+
+    if (!empty($matching_price_deltas)) {
+      // Если есть записи с той же ценой, добавляем новое количество
+      foreach ($matching_price_deltas as $delta) {
+        $existing_data = json_decode($existing_stock_data[$delta], TRUE);
+        $existing_data['quantity'] += $values['quantity'];
+        $existing_stock_data[$delta] = json_encode($existing_data);
+      }
+
+      // Обновляем существующие записи с новыми данными
+      foreach ($existing_stock_data as $delta => $data) {
+        db_update('field_data_field_stockdata')
+          ->fields(array(
+            'field_stockdata_value' => $data,
+          ))
+          ->condition('entity_type', 'node')
+          ->condition('bundle', 'product')
+          ->condition('entity_id', $product)
+          ->condition('delta', $delta)
+          ->execute();
+      }
+    } else {
+      // Если нет записей с той же ценой, добавляем новую запись
+      $max_delta = max(array_keys($existing_stock_data));
+
+      db_insert('field_data_field_stockdata')
+        ->fields(array(
+          'entity_type' => 'node',
+          'bundle' => 'product',
+          'entity_id' => $product,
+          'revision_id' => $product,
+          'delta' => $max_delta + 1,
+          'field_stockdata_value' => $stock_data_json,
+        ))
+        ->execute();
+    }
+
+    drupal_set_message('Quantity for the product added successfully.');
+  }
+
+  $form_state['redirect'] = 'admin/stockproducts';
+}
+
+
+
+
+
+
+
+/**
+ * Page callback for deleting a product item.
+ */
+function stockproducts_delete_item($nid) {
+  $node = node_load($nid);
+
+  // Проверка, является ли узел товаром
+  if ($node->type == 'product') {
+    node_delete($nid);
+    drupal_set_message('Product deleted successfully.');
+  } else {
+    drupal_set_message('Invalid product.', 'error');
+  }
+
+  drupal_goto('admin/stockproducts');
+}
+
+/**
+ * Page callback for editing the quantity of a product.
+ */
+function stockproducts_edit_quantity($nid, $quantity) {
+  $node = node_load($nid);
+
+  // Проверка, является ли узел товаром
+  if ($node->type == 'product') {
+    $stock_data = json_decode($node->field_stockdata['und'][0]['value'], TRUE);
+
+    // Изменение количества товара
+    $stock_data['quantity'] += $quantity;
+
+    $node->field_stockdata[LANGUAGE_NONE][0]['value'] = json_encode($stock_data);
+    node_save($node);
+
+    drupal_set_message('Quantity updated successfully.');
+  } else {
+    drupal_set_message('Invalid product.', 'error');
+  }
+
+  drupal_goto('admin/stockproducts');
+}
+
+/**
+ * Implements hook_permission().
+ */
+function stockproducts_permission() {
+  return array(
+    'administer stock products' => array(
+      'title' => 'Administer Stock Products',
+      'description' => 'Perform administration tasks for stock products.',
+    ),
+  );
+}

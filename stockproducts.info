@@ -1,0 +1,6 @@
+name = Stock Products
+description = Module for managing stock products.
+core = 7.x
+package = Custom
+dependencies[] = views
+dependencies[] = ctools
