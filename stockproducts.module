@@ -1,6 +1,14 @@
 <?php
 
 /**
+ * Implements hook_init().
+ */
+function stockproducts_init() {
+  // Attach CSS file for the stockproducts module.
+  drupal_add_css(drupal_get_path('module', 'stockproducts') . '/css/style.css');
+}
+
+/**
  * Implements hook_menu().
  */
 function stockproducts_menu() {
@@ -9,16 +17,10 @@ function stockproducts_menu() {
   // Страница списка товаров
   $items['admin/stockproducts'] = array(
     'title' => 'Stock Products',
-    'page callback' => 'stockproducts_list_page',
-    'access arguments' => array('access content'),
-  );
-
-  // Форма добавления товара
-  $items['admin/stockproducts/add'] = array(
-    'title' => 'Add Product',
     'page callback' => 'drupal_get_form',
-    'page arguments' => array('stockproducts_add_form'),
-    'access arguments' => array('administer stock products'),
+    'page arguments' => array('stockproducts_list_page'),
+    'access arguments' => array('access content'),
+    'type'             => MENU_LOCAL_TASK,
   );
 
   // Обработчик формы добавления товара
@@ -34,19 +36,467 @@ function stockproducts_menu() {
     'access arguments' => array('administer stock products'),
     'type' => MENU_CALLBACK,
   );
+  
+    // Отображения заказов в статусе "processing".
+  $items['admin/stockproducts/orders-in-progress'] = array(
+    'title' => 'Orders in progress',
+    'description' => 'Displays orders in progress.',
+    'page callback' => 'stockproducts_orders_in_progress',
+    'access arguments' => array('access administration pages'),
+    'type' => MENU_NORMAL_ITEM,
+  );
 
   return $items;
+}
+
+
+function stockproducts_status_uc_order($order) {
+
+    $status_new = $order['statusnew'];
+    $status_old = $order['statusold'];
+    
+    $query = db_select('field_data_field_stockdata', 'fs')
+        ->fields('fs', array('field_stockdata_value', 'delta', 'entity_id'))
+        ->condition('fs.entity_type', 'node')
+        ->condition('fs.bundle', 'product');
+    $stockdata_value = $query->execute()->fetchAll();
+      
+    $stock_data = array();
+    $updated_stock_data = array();
+
+
+    foreach ($stockdata_value as $stockdata_value_row) {   
+        $stockdata_value_row_prep = json_decode($stockdata_value_row->field_stockdata_value, TRUE);
+        $stockdata_value_row_prep['delta'] = $stockdata_value_row->delta;     
+        $stockdata_arr[$stockdata_value_row->entity_id][] = $stockdata_value_row_prep;
+    }
+    dsm($stockdata_arr);
+    
+                                                        //completed
+    if(($status_old == 'processing') && ($status_new == 'completed')){
+        $updated_order = $order['updated_order'];
+        $order_id = $updated_order->order_id;
+        dsm($updated_order);
+        foreach ($updated_order->products as $key => $product) {            
+        
+            if      ($product->nid == 826){
+                     $product->nid = 543;   //exceptions
+            }else if($product->nid == 514){
+                     $product->nid = 103;   //exceptions                    
+                     $product->qty = $product->qty*2;
+            }else if($product->nid == 685){
+                     $product->nid = 543;   //exceptions                    
+                     $product->qty = $product->qty*2;
+            }
+            $nid = $product->nid; // get actual nid for correction qty after exceptions
+            
+            if (!empty($product->data['attributes'])) {
+              foreach ($product->data['attributes'] as $attribute) {
+                
+                $attribute_name = key($attribute);
+                $attribute_value = reset($attribute);
+                
+                if ($attribute_value > 0) {
+                
+                    if(($attribute_name == 67) || ($attribute_name == 94)) { $attribute_value = 1;} //exceptions
+                    if(($attribute_name == 64) || ($attribute_name == 88)|| ($attribute_name == 26) || ($attribute_name == 28)) { $attribute_value = 2;} //exceptions
+                    if(($attribute_name == 96) || ($attribute_name == 89))  { $attribute_value = 3;} //exceptions
+                    if(($attribute_name == 65) )  { $attribute_value = 4;} //exceptions
+                    if(($attribute_name == 27) || ($attribute_name == 29) )  { $attribute_value = 5;} //exceptions
+                    if(($attribute_name == 66) )  { $attribute_value = 6;} //exceptions
+                    $product->qty = $product->qty*$attribute_value;
+                } else {
+                      dsm($attribute_value);
+                      $attribute_value = 1;
+                      }
+                }
+           }
+           
+        $qty = $product->qty;
+        if(!empty($stockdata_arr[$nid]))
+          foreach ($stockdata_arr[$nid] as $index => $item_nid) {
+
+            $node = node_load($nid);
+            dsm($node);
+            $delta = $stockdata_arr[$nid][$index]['delta'];
+            if(($item_nid['quantity'] < $qty) && ($qty != 0) ){
+                  
+                  $qty -= $item_nid['quantity'];
+                  unset($stockdata_arr[$nid][$index]); // delete data
+                  db_delete('field_data_field_stockdata')
+                    ->condition('entity_type', 'node')
+                    ->condition('bundle', 'product')
+                    ->condition('entity_id', $nid)
+                    ->condition('delta', $delta)
+                    ->execute();
+                  dsm('item quantity < ');
+           
+                   
+                  
+            }else if(($item_nid['quantity'] >= $qty) && ($qty != 0)){
+              
+                  unset($stockdata_arr[$nid][$index]['delta']);
+                  $stockdata_arr[$nid][$index]['quantity'] -= $qty;
+
+                  db_update('field_data_field_stockdata')
+                    ->fields(array('field_stockdata_value' => json_encode( $stockdata_arr[$nid][$index])))
+                    ->condition('entity_type', 'node')
+                    ->condition('bundle', 'product')
+                    ->condition('entity_id', $nid)
+                    ->condition('delta', $delta)
+                    ->execute();
+                  $qty = 0;
+            }                       
+          }
+        }
+    }
+}    
+ 
+
+
+
+
+/**
+ * Page callback to display orders in progress.
+ */
+function stockproducts_orders_in_progress() {
+  // Подключаем файл содержащий функцию uc_order_load_multiple().
+  module_load_include('inc', 'uc_order', 'uc_order.pages');
+
+  $header = array(
+    'order_id' => array(
+      'data' => t('ID order'),
+      'field' => 'order_id',
+      'sort' => 'desc',
+    ),
+    'order_total' => t('Sum order'),
+    'delivery_last_name' => t('Name'),
+    'created' => t('Date'),
+    'item_prices' => t('Item Prices buy'),
+    'difference' => t('Income'), // Добавляем заголовок для новой колонки
+  );
+
+  $query = db_select('uc_orders', 'o')
+    ->fields('o', array('order_id', 'order_total', 'product_count', 'delivery_city', 'delivery_phone', 'delivery_last_name', 'delivery_first_name', 'created'))
+    ->condition('o.order_status', 'processing')
+    ->condition('o.created', strtotime('2022-11-01 00:00:00'), '>=')
+    ->orderBy('o.order_id', 'DESC');
+
+  // Выполняем запрос.
+  $result = $query->execute();
+
+  $rows = array();
+  $data_order = array();
+  $total_difference = 0;
+  $total_order_sum = 0;
+  $attribute_option_class = '';
+  $attribute_option_style = '';
+    foreach ($result as $row) {
+        //dsm($row);
+        $order_id = $row->order_id;
+        $order = uc_order_load_multiple(array($order_id));
+        $data_order[$order_id] = new stdClass();
+ 
+        foreach ($order[$order_id]->products as $key => $product) {
+        
+          if      ($product->nid == 826){
+                   $product->nid = 543;   //exceptions
+          }else if($product->nid == 514){
+                   $product->nid = 103;   //exceptions                    
+                   $product->qty = $product->qty*2;
+          }else if($product->nid == 685){
+                   $product->nid = 543;   //exceptions                    
+                   $product->qty = $product->qty*2;
+          }
+          
+          $attribute_value = 1;
+          $attribute_option_class = '';
+          $attribute_option_style = '';
+          if (!empty($product->data['attributes'])) {
+            foreach ($product->data['attributes'] as $attribute) {
+                
+              $attribute_name = key($attribute);
+              $attribute_value = reset($attribute);
+              
+              if ($attribute_value > 0) {
+              
+                  if(($attribute_name == 67) || ($attribute_name == 94)) { $attribute_value = 1;} //exceptions
+                  if(($attribute_name == 64) || ($attribute_name == 88)|| ($attribute_name == 26) || ($attribute_name == 28)) { $attribute_value = 2;} //exceptions
+                  if(($attribute_name == 96) || ($attribute_name == 89))  { $attribute_value = 3;} //exceptions
+                  if(($attribute_name == 65) )  { $attribute_value = 4;} //exceptions
+                  if(($attribute_name == 27) || ($attribute_name == 29) )  { $attribute_value = 5;} //exceptions
+                  if(($attribute_name == 66) )  { $attribute_value = 6;} //exceptions
+                  $product->qty = $product->qty*$attribute_value;
+              } else {
+                    dsm($attribute_value);
+                    $attribute_value = 1;
+                    }
+              if ($attribute_value > 1) {
+                      $attribute_option_class = 'attributeoption';
+                      $attribute_option_style = 'color:#171acc;font-weight: bold;';
+              } else {
+                      $attribute_option_class = '';
+                      $attribute_option_style = '';
+              }       
+        
+            }
+          }
+          
+
+          $data_order[$order_id]->products[$key] = $product;
+        }
+        
+        
+        $data_order[$order_id]->order_id = $order_id;
+        $data_order[$order_id]->order_total = $order[$order_id]->order_total;
+        $data_order[$order_id]->delivery_last_name = $order[$order_id]->delivery_last_name;
+        $data_order[$order_id]->delivery_first_name = $order[$order_id]-> delivery_first_name;
+        $data_order[$order_id]->created = $order[$order_id]->created;
+        $data_order[$order_id]->totalpurchase_price = 0;
+        $data_order[$order_id]->difference = 0;
+        
+
+        if($order_id ==  17209){
+           // dsm( $data_order[17209]);
+        }
+        $total_order_sum += $order[$order_id]->order_total;
+    }
+//dsm($data_order);
+
+    $query = db_select('field_data_field_stockdata', 'fs')
+        ->fields('fs', array('field_stockdata_value', 'entity_id'))
+        ->condition('fs.entity_type', 'node')
+        ->condition('fs.bundle', 'product');
+    $stockdata_value = $query->execute()->fetchAll();
+      
+    foreach ($stockdata_value as $stockdata_value_row) {         
+        $stockdata_arr[$stockdata_value_row->entity_id][] = json_decode($stockdata_value_row->field_stockdata_value, TRUE);
+    }
+
+//dsm($stockdata_arr);
+// dsm($data_order); 
+  foreach ($data_order as $key => $row) {
+  
+    $purchase_price = 0;
+    $order_id = $row->order_id;
+    foreach ($row->products as $productrow) {
+      $qty = $productrow->qty;     
+      $nid = $productrow->nid;
+
+      if(!empty($stockdata_arr[$nid]))
+          foreach ($stockdata_arr[$nid] as $index => $item_nid) {
+
+          
+            if(($item_nid['quantity'] < $qty) && ($qty != 0) ){
+                  $purchase_price += $item_nid['purchase_price']*$item_nid['quantity'];
+                  $qty -= $item_nid['quantity'];
+                  unset($stockdata_arr[$nid][$index]);
+                  // удалить из списка
+                   
+                  
+              }else if(($item_nid['quantity'] >= $qty) && ($qty != 0)){
+              
+                  $purchase_price += $item_nid['purchase_price']*$qty;                  
+                  $stockdata_arr[$nid][$index]['quantity'] -= $qty;
+                  //$item_nid['quantity'] -= $qty;
+                  
+                  if($nid == 103){
+                    //dsm('qty 103 ' . $qty );  
+                  }
+                  $qty = 0;
+                  // удалить из списка
+                  //dsm('else purchase_price = ' . $purchase_price);
+              }
+                       
+          }
+                 
+          $data_order[$key]->totalpurchase_price = $purchase_price;
+ 
+    }
+  }
+
+    $differences = array();
+    foreach ($data_order as $key => $product) {  
+        
+            $purchase_price = $product->totalpurchase_price;  
+            if ($purchase_price > 0) {
+              $difference = $product->order_total - $purchase_price;
+              $data_order[$key]->difference = $difference;
+              $differences[] = $difference;
+              $total_difference += $difference;
+            } else {
+              $differences[] = 0;
+              $total_difference += $difference;
+            }
+      
+      
+    }
+    
+    
+  
+  // заполнение данными 
+  foreach ($data_order as $row) {
+  //dsm($row);
+  $order_id = $row->order_id;
+           
+    $row_data = array(
+      l($order_id, 'admin/store/orders/' . $order_id),
+      $row->order_total,
+      $row->delivery_last_name . " " . $row->delivery_first_name,
+      format_date($row->created, 'short'),
+      $row->totalpurchase_price,
+      array(
+        'data' => $row->difference,
+        'class' => $attribute_option_class,
+        'style' => $attribute_option_style,
+      ),
+    );
+    
+    foreach ($row_data as &$data) {
+        if (is_array($data)) {
+          $data['class'] = 'negative-difference';
+          $data['style'] = 'font-weight:bold';
+        }
+      }
+    $rows[] = array('data' => $row_data);
+  }  
+
+  // Рассчитываем разницу между общей суммой и общей суммой разницы
+  $total_sum_difference = $total_order_sum - $total_difference;
+
+  $rows[] = array(
+    'data' => array(
+      array(
+        'data' => t('Total Order Sum: @total_order_sum', array('@total_order_sum' => $total_order_sum)),
+        'style' => 'text-align:right; font-weight:bold;',
+      ),
+      array(
+        'data' => t('Total back: @total_sum_difference', array('@total_sum_difference' => $total_sum_difference)),
+        'style' => 'text-align:right; font-weight:bold;',
+      ),
+      array(
+        'data' => t('Total Difference: @total_difference', array('@total_difference' => $total_difference)),
+        'style' => 'text-align:right; font-weight:bold;',
+      ),      
+    ),
+  );
+  
+  
+  return theme('table', array('header' => $header, 'rows' => $rows));
+
+}
+
+function _getqty($nid, $stock_data){
+
+
+  $query = db_select('uc_orders', 'o')
+    ->fields('o', array('order_id', 'order_total', 'product_count', 'delivery_city', 'delivery_phone', 'delivery_last_name', 'delivery_first_name', 'created'))
+    ->condition('o.order_status', 'processing')
+    ->condition('o.created', strtotime('2022-11-01 00:00:00'), '>=')
+    ->orderBy('o.order_id', 'DESC');
+
+    // Выполняем запрос.
+    $result = $query->execute();
+    dsm('_getqty ' . $nid);
+    $totalproductsqty = 0;
+    foreach ($result as $row) {
+        //dsm($row);
+        $order_id = $row->order_id;
+        $order = uc_order_load_multiple(array($order_id));
+        foreach ($order[$order_id]->products as $key => $product) {
+        
+            if($product->nid == $nid){
+              if      ($product->nid == 826){
+                       $product->nid = 543;  $nid = 543; //exceptions
+              }else if($product->nid == 514){
+                       $product->nid = 103;  $nid = 103; //exceptions                    
+                       $product->qty = $product->qty*2;
+              }else if($product->nid == 685){
+                       $product->nid = 543;  $nid = 543;//exceptions                    
+                       $product->qty = $product->qty*2;
+              }
+            }
+                
+          //dsm('product->nid ' . $product->nid . ' nid ' .$nid);
+          if($product->nid == $nid){
+            dsm('nid ' . $nid . ' order ' . $order_id . ' qty ' . $product->qty );
+              
+              
+            $attribute_value = 1;
+     
+            if (!empty($product->data['attributes'])) {
+                foreach ($product->data['attributes'] as $attribute) {
+                    
+                  $attribute_name = key($attribute);
+                  $attribute_value = reset($attribute);
+                  
+                  if ($attribute_value > 0) {
+                  
+                      if(($attribute_name == 67) || ($attribute_name == 94)) { $attribute_value = 1;} //exceptions
+                      if(($attribute_name == 64) || ($attribute_name == 88)|| ($attribute_name == 26) || ($attribute_name == 28)) { $attribute_value = 2;} //exceptions
+                      if(($attribute_name == 96) || ($attribute_name == 89))  { $attribute_value = 3;} //exceptions
+                      if(($attribute_name == 65) )  { $attribute_value = 4;} //exceptions
+                      if(($attribute_name == 27) || ($attribute_name == 29) )  { $attribute_value = 5;} //exceptions
+                      if(($attribute_name == 66) )  { $attribute_value = 6;} //exceptions
+                      $product->qty = $product->qty*$attribute_value;
+                      
+                  } else {
+                      $attribute_value = 1;
+                  }
+                         
+            
+                }
+              }
+              $totalproductsqty += $product->qty;
+              $order[$order_id]->products[$key] = $product;
+          }
+        }
+    }
+    
+    return $totalproductsqty;
 }
 
 
 /**
  * Page callback for the stock products list page.
  */
-function stockproducts_list_page() {
-  $header = array('Product', 'SKU', 'Quantity', 'Purchase Price', 'Actions');
+ 
+function stockproducts_list_page($form, &$form_state) {
+  $form = array();
+  
+  // Form fields for adding a product
+  $form['node_id'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Node ID',
+  );
+
+  $form['quantity'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Quantity',
+  );
+
+  $form['purchase_price'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Purchase Price',
+  );
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Add'),
+    '#submit' => array('stockproducts_add_form_submit'),
+  );
+  
+  $form['submit'] = array(
+ '#type' => 'markup',
+ '#markup' => '<p>Do not add for dobled products, beacuse they change example /node/543</p>',
+ );
+ 
+  
+  // Table header
+  $header = array('Product', 'SKU', 'Quantity', 'Purchase Price', 'Actions', 'actual qty');
   $rows = array();
 
-  // Получение списка товаров из базы данных
+  // Fetching list of products from the database
   $results = db_query('SELECT n.nid, n.title, p.model, f.entity_id, f.field_stockdata_value
     FROM {node} n
     INNER JOIN {uc_products} p ON n.nid = p.nid
@@ -65,65 +515,83 @@ function stockproducts_list_page() {
         'data-entity-id' => $result->entity_id,
         'data-purchase-price' => $stock_data['purchase_price'],
       ),
+      '#executes_submit_callback' => FALSE,
     );
+    
+    $actualqty = '';
+    if(empty($uniquenid[$result->nid]))
+        $actualqty = _getqty($result->nid, $stock_data);
+    $uniquenid[$result->nid] = $result->nid;
 
     $rows[] = array(
-      l($node->nid . " " . $node->title  , 'node/' . $node->nid),
+      l($node->nid . " " . $node->title, 'node/' . $node->nid),
       $result->model,
       $stock_data['quantity'],
       $stock_data['purchase_price'],
       drupal_render($delete_button),
+      $actualqty,
     );
   }
 
-    $output = theme('table', array('header' => $header, 'rows' => $rows));
+  $form['table'] = array(
+    '#markup' => theme('table', array('header' => $header, 'rows' => $rows)),
+  );
 
-  // Добавление скрипта для обработки кнопок удаления
-  $output .= '<script>
-    (function ($) {
-      $(document).ready(function() {
-        $(".stockproduct-delete-button").click(function() {
-          var entityId = $(this).data("entity-id");
-          var purchasePrice = $(this).data("purchase-price");
-          var quantity = prompt("Enter the quantity to delete:");
-          if (quantity !== null) {
-            stockproducts_delete(entityId, purchasePrice, quantity);
-          }
-        });
-      });
+  // Adding the necessary JavaScript
+  $form['#attached']['library'][] = 'system/drupal.ajax';
 
-      function stockproducts_delete(entityId, purchasePrice, quantity) {
-        // Отправка AJAX-запроса для удаления товара
-        console.log(entityId, purchasePrice, quantity);
-        $.ajax({
-          url: "/stockproducts/delete",
-          type: "POST",
-          dataType: "json",
-          data: {
-            entityId: entityId,
-            purchase_price: purchasePrice,
-            quantity: quantity,
-          },
-          success: function(response) {
-            if (response.success) {
-              /*alert("Product data deleted successfully.");*/
-              location.reload();
-            } else {
-              alert("An error occurred while deleting product data.");
+  $form['#attached']['js'][] = array(
+    'type' => 'inline',
+    'data' => '
+      (function ($) {
+          $(document).ready(function() {
+            $(".stockproduct-delete-button").mousedown(function(event) {
+              event.stopPropagation();
+              var entityId = $(this).data("entity-id");
+              var purchasePrice = $(this).data("purchase-price");
+              var quantity = prompt("Enter the quantity to delete:");
+              if (quantity !== null) {
+                stockproducts_delete(entityId, purchasePrice, quantity);
+              }
+            });
+          });
+
+        function stockproducts_delete(entityId, purchasePrice, quantity) {
+          // AJAX request to delete the product
+          $.ajax({
+            url: "/stockproducts/delete",
+            type: "POST",
+            dataType: "json",
+            data: {
+              entityId: entityId,
+              purchase_price: purchasePrice,
+              quantity: quantity,
+            },
+            success: function(response) {
+              if (response.success) {
+                location.reload();
+              } else {
+                //console.log(response);
+                //alert("An error occurred while deleting product data.");
+              }
+            },
+            error: function() {
+              //console.log("error");
+              //alert("An error occurred while deleting product data.");
             }
-          },
-          error: function() {
-            alert("An error occurred while deleting product data.");
-          }
-        });  
-      }
-    })(jQuery);
-  </script>';
+          });
+        }
+      })(jQuery);
+    ',
+  );
 
-  return $output;
+  return $form;
 }
 
+
 function stockproducts_delete_callback() {
+
+
   dsm('$POST');
   dsm($_POST);
   $entityId = $_POST['entityId'];
@@ -185,120 +653,94 @@ function stockproducts_delete_callback() {
     }
 }
 
-
-
-/**
- * Form callback for the add product form.
- */
-function stockproducts_add_form($form, &$form_state) {
-
-  $form['node_id'] = array(
-    '#type' => 'textfield',
-    '#title' => 'Node ID',
-    '#required' => TRUE,
-  );
-
-  $form['quantity'] = array(
-    '#type' => 'textfield',
-    '#title' => 'Quantity',
-    '#required' => TRUE,
-  );
-
-  $form['purchase_price'] = array(
-    '#type' => 'textfield',
-    '#title' => 'Purchase Price',
-    '#required' => TRUE,
-  );
-
-  $form['submit'] = array(
-    '#type' => 'submit',
-    '#value' => 'Add',
-  );
-
-  return $form;
-}
-
 /**
  * Form submit callback for the add product form.
  */
 function stockproducts_add_form_submit($form, &$form_state) {
-  $values = $form_state['values'];
-  $nodeId = $values['node_id'];
-  $values['type'] = 'product';
 
-  // Поиск товара 
-    $product = db_query("SELECT p.nid FROM {node} p WHERE p.nid = :node_id AND p.type = :type", array(':node_id' => $nodeId, ':type' => $values['type']))->fetchField();
+  // Check if the submit button with the name "op" is "Add"
+  dsm($form_state);
+  if ($form_state['triggering_element']['#name'] == 'op' && $form_state['triggering_element']['#value'] == t('Add')) {
 
-
-
-  if (!$product) {
-    drupal_set_message('A product with the specified SKU does not exist.', 'error');
-  } else {
-    // Создание данных о запасах
-    $stock_data = array(
-      'quantity' => $values['quantity'],
-      'purchase_price' => $values['purchase_price'],
-    );
-
-    // Сериализация данных о запасах
-    $stock_data_json = json_encode($stock_data);
+    $values = $form_state['values'];
+    $nodeId = $values['node_id'];
+    $values['type'] = 'product';
+      if($nodeId > 0){
+      // Поиск товара 
+        $product = db_query("SELECT p.nid FROM {node} p WHERE p.nid = :node_id AND p.type = :type", array(':node_id' => $nodeId, ':type' => $values['type']))->fetchField();
     
-    // Поиск существующих данных о запасах для данного товара
-    $existing_stock_data = db_query("SELECT delta, field_stockdata_value FROM {field_data_field_stockdata} WHERE entity_type = :entity_type AND bundle = :bundle AND entity_id = :entity_id", array(
-      ':entity_type' => 'node',
-      ':bundle' => 'product',
-      ':entity_id' => $product,
-    ))->fetchAllKeyed(0, 1);
-
-    // Проверка наличия записей о запасах с той же ценой
-    $matching_price_deltas = array();
-    foreach ($existing_stock_data as $delta => $data) {
-      $existing_data = json_decode($data, TRUE);
-      if ($existing_data['purchase_price'] == $values['purchase_price']) {
-        $matching_price_deltas[] = $delta;
+    
+    
+      if (!$product) {
+        drupal_set_message('A product with the specified SKU does not exist.', 'error');
+      } else {
+        // Создание данных о запасах
+        $stock_data = array(
+          'quantity' => $values['quantity'],
+          'purchase_price' => $values['purchase_price'],
+        );
+    
+        // Сериализация данных о запасах
+        $stock_data_json = json_encode($stock_data);
+        
+        // Поиск существующих данных о запасах для данного товара
+        $existing_stock_data = db_query("SELECT delta, field_stockdata_value FROM {field_data_field_stockdata} WHERE entity_type = :entity_type AND bundle = :bundle AND entity_id = :entity_id", array(
+          ':entity_type' => 'node',
+          ':bundle' => 'product',
+          ':entity_id' => $product,
+        ))->fetchAllKeyed(0, 1);
+    
+        // Проверка наличия записей о запасах с той же ценой
+        $matching_price_deltas = array();
+        foreach ($existing_stock_data as $delta => $data) {
+          $existing_data = json_decode($data, TRUE);
+          if ($existing_data['purchase_price'] == $values['purchase_price']) {
+            $matching_price_deltas[] = $delta;
+          }
+        }
+    
+        if (!empty($matching_price_deltas)) {
+          // Если есть записи с той же ценой, добавляем новое количество
+          foreach ($matching_price_deltas as $delta) {
+            $existing_data = json_decode($existing_stock_data[$delta], TRUE);
+            $existing_data['quantity'] += $values['quantity'];
+            $existing_stock_data[$delta] = json_encode($existing_data);
+          }
+    
+          // Обновляем существующие записи с новыми данными
+          foreach ($existing_stock_data as $delta => $data) {
+            db_update('field_data_field_stockdata')
+              ->fields(array(
+                'field_stockdata_value' => $data,
+              ))
+              ->condition('entity_type', 'node')
+              ->condition('bundle', 'product')
+              ->condition('entity_id', $product)
+              ->condition('delta', $delta)
+              ->execute();
+          }
+        } else {
+          // Если нет записей с той же ценой, добавляем новую запись
+          $max_delta = max(array_keys($existing_stock_data));
+    
+          db_insert('field_data_field_stockdata')
+            ->fields(array(
+              'entity_type' => 'node',
+              'bundle' => 'product',
+              'entity_id' => $product,
+              'revision_id' => $product,
+              'delta' => $max_delta + 1,
+              'field_stockdata_value' => $stock_data_json,
+            ))
+            ->execute();
+        }
+    
+        drupal_set_message('Quantity for the product added successfully.');
       }
+    
+      $form_state['redirect'] = 'admin/stockproducts';
     }
-
-    if (!empty($matching_price_deltas)) {
-      // Если есть записи с той же ценой, добавляем новое количество
-      foreach ($matching_price_deltas as $delta) {
-        $existing_data = json_decode($existing_stock_data[$delta], TRUE);
-        $existing_data['quantity'] += $values['quantity'];
-        $existing_stock_data[$delta] = json_encode($existing_data);
-      }
-
-      // Обновляем существующие записи с новыми данными
-      foreach ($existing_stock_data as $delta => $data) {
-        db_update('field_data_field_stockdata')
-          ->fields(array(
-            'field_stockdata_value' => $data,
-          ))
-          ->condition('entity_type', 'node')
-          ->condition('bundle', 'product')
-          ->condition('entity_id', $product)
-          ->condition('delta', $delta)
-          ->execute();
-      }
-    } else {
-      // Если нет записей с той же ценой, добавляем новую запись
-      $max_delta = max(array_keys($existing_stock_data));
-
-      db_insert('field_data_field_stockdata')
-        ->fields(array(
-          'entity_type' => 'node',
-          'bundle' => 'product',
-          'entity_id' => $product,
-          'revision_id' => $product,
-          'delta' => $max_delta + 1,
-          'field_stockdata_value' => $stock_data_json,
-        ))
-        ->execute();
-    }
-
-    drupal_set_message('Quantity for the product added successfully.');
   }
-
-  $form_state['redirect'] = 'admin/stockproducts';
 }
 
 

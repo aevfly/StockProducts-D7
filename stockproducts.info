@@ -4,3 +4,6 @@ core = 7.x
 package = Custom
 dependencies[] = views
 dependencies[] = ctools
+dependencies[] = uc_order
+dependencies[] = ubercart
+files[] = stockproducts.pages.inc
